@@ -8,6 +8,14 @@ A production-ready inventory + AI assistant system for a bakery & chocolate manu
 
 The original brief lives at `../cookies_problem.txt`. Read it once for context. Do not commit it from this repo.
 
+## Status
+
+- **Live deployment:** https://crazy-brownies-inventory.vercel.app (production target on Vercel; pooler region is `aws-1-eu-central-1`)
+- **GitHub:** https://github.com/michael-maina1/crazy-brownies-inventory (public)
+- **Supabase:** Frankfurt project; schema migrated, RLS active, realtime publication live for `ingredients`/`orders`/`stock_movements`
+- **Brand recon:** archived in `.cb-recon/SUMMARY.md` (gitignored). Real Crazy Brownies catalog seeded; channels match their actual ops (in-store / website / Deliveroo / corporate).
+- **MVP screens shipped:** Dashboard, Inventory, Products, Orders, Suppliers (placeholder), AI Assistant.
+
 ## Goals (in priority order)
 
 1. **Looks like a real product**, not a tutorial dashboard. Tasteful, calm UI. shadcn defaults beat custom flair.
@@ -77,7 +85,7 @@ seed/                         # seed scripts and CSVs
 | `ingredients` | raw stock: name, unit (g/kg/ea), current_stock, reorder_threshold, supplier_id, cost_per_unit |
 | `products` | sellable SKUs: name, price_aed, category |
 | `recipes` | join table: product_id × ingredient_id × quantity_per_unit (the "1 slab = 400g chocolate" mapping) |
-| `orders` | header: created_at, channel (in-store / talabat / careem / website), total_aed, customer_note |
+| `orders` | header: created_at, channel (`in_store` / `website` / `deliveroo` / `corporate`), total_fils, customer_note |
 | `order_items` | line items: order_id × product_id × qty × unit_price_snapshot |
 | `stock_movements` | append-only ledger of every ingredient change (sale-deduct, restock, waste, adjustment). All inventory changes flow through this — never mutate `ingredients.current_stock` without writing a movement |
 
@@ -126,3 +134,48 @@ ANTHROPIC_API_KEY=
 - **No fallback noise** (try/catch around things that can't fail, defensive checks against impossible states). Trust the type system and DB constraints.
 - **Test the closed loop on camera-able paths** before marking screens done: log in as staff → record an order → watch dashboard tick down → ask the AI "what's running low?" → see real grounded answer.
 - When in doubt about a Next.js 16 API, **read `node_modules/next/dist/docs/`** before writing code.
+
+## Roadmap (decided, not yet built)
+
+The MVP demonstrates ~85% of the JD. The remaining 15% is two depth features. The user paused on 2026-05-09 to sleep on whether to build them before recording the demo. **Do not start either of these without explicit user confirmation.**
+
+### Phase 2 — Batch + expiry tracking (next, recommended)
+
+Real F&B waste is expiry-driven, not loss-driven. Current `stock_movements` records waste *events* but not *risk*. Adding lot/batch tracking unlocks the most expensive form of waste detection.
+
+Proposed schema add:
+
+```ts
+ingredient_batches {
+  id, ingredient_id, batch_code, supplier_id, invoice_ref,
+  received_at, expires_at,
+  quantity_received, quantity_remaining,
+  cost_fils
+}
+```
+
+Required changes:
+- `recordStockMovement` becomes FIFO-aware — deduct from oldest non-expired batch first; cascade to next batch if first is depleted.
+- Seed needs realistic shelf lives per ingredient (chocolate 12mo, pistachio cream 4mo, kunafa 5mo, butter 30d, **cream 7d**, **eggs 21d**, lotus 9mo).
+- New AI tools: `get_expiring_soon(days)`, `recommend_promotion_to_avoid_waste`.
+- Dashboard panel: "Expiring this week" with AED-at-risk total.
+- Inventory drawer: per-ingredient batch list with received/expires/remaining columns.
+
+Effort: ~2–3 hrs focused.
+
+### Phase 3 — AI invoice ingestion (held as outreach teaser, not built)
+
+Manager photographs a supplier WhatsApp delivery note. Claude vision (`messages.create` with `image` content blocks) extracts ingredient name, quantity, batch code, expiry date, cost. System proposes a draft restock movement; manager taps approve. Killer because every F&B owner re-types delivery notes from photos every day.
+
+**Decision:** show this as a 30-second concept moment in the recorded demo ("here's what I'd build first if you bring me on") rather than building it. Leaves room to be hired to do the work, not just shown the work.
+
+### Phases 4+ — Channel integrations
+
+Ecwid webhook → website orders auto-flow in. Deliveroo Partner API → live delivery channel sales. WhatsApp Business webhook → supplier confirmation messages. Out of scope for the demo; mention in outreach as the integration path.
+
+## Out-of-scope deliberately
+
+- Per-warehouse multi-location (schema would support, UI doesn't — they're one location)
+- Customer accounts (this is an internal tool)
+- Custom backup/restore beyond Supabase's daily snapshots
+- Vision-based inventory counting (out of phase scope)
