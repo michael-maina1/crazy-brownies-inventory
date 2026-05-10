@@ -8,18 +8,19 @@ import {
   getWastePercent,
 } from "@/db/queries/dashboard";
 import { getExpiringSoonSummary, getExpiringSoonBatches } from "@/db/queries/batches";
-import { getTomorrowForecast } from "@/db/queries/forecasts";
+import { getTomorrowForecast, get7DayForecastMatrix } from "@/db/queries/forecasts";
 import { KPICard } from "@/components/app/kpi-card";
 import { StockStatusBadge, ChannelBadge, FreshnessBadge } from "@/components/app/status-badge";
 import { SalesChart } from "@/components/app/sales-chart";
 import { ForecastWidget } from "@/components/app/forecast-widget";
+import { ForecastMatrixCard } from "@/components/app/forecast-matrix";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAED, formatAEDCompact, formatQuantity, formatRelative, stockStatus } from "@/lib/format";
 import { CircleDollarSign, AlertTriangle, Recycle, Clock4 } from "lucide-react";
 import Link from "next/link";
 
 export default async function DashboardPage() {
-  const [today, last30, lowStock, series, top, recent, wastePct, atRisk, expiring, forecast] =
+  const [today, last30, lowStock, series, top, recent, wastePct, atRisk, expiring, forecast, weekMatrix] =
     await Promise.all([
       getOrdersToday(),
       getRevenueLast30Days(),
@@ -31,6 +32,7 @@ export default async function DashboardPage() {
       getExpiringSoonSummary(7),
       getExpiringSoonBatches(7, 6),
       getTomorrowForecast(8),
+      get7DayForecastMatrix(10),
     ]);
 
   const outCount = lowStock.filter((i) => Number(i.currentStock) <= 0).length;
@@ -92,7 +94,10 @@ export default async function DashboardPage() {
         />
       </div>
 
-      {/* ── Section 2 · Tomorrow's plan + reorder list ───────────────────── */}
+      {/* ── Section 2 · 7-day bake matrix ─────────────────────────────────── */}
+      <ForecastMatrixCard matrix={weekMatrix} />
+
+      {/* ── Section 3 · Tomorrow's plan (verb-first) + reorder list ───────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2">
           <ForecastWidget rows={forecast} />
