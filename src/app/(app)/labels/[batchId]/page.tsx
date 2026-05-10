@@ -34,22 +34,13 @@ export default async function LabelsPage({
 
   return (
     <div className="bg-muted/40 min-h-svh">
-      <PrintTrigger />
       <div className="no-print p-6 max-w-2xl mx-auto">
         <h1 className="text-2xl font-semibold tracking-tight">Print labels</h1>
         <p className="text-sm text-muted-foreground mt-1">
           {count} × <span className="font-medium text-foreground">{batch.productName}</span> · batch{" "}
-          <code className="text-xs">{batch.batchCode}</code>. The print dialog should open
-          automatically — if not,{" "}
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="underline underline-offset-2"
-          >
-            click here
-          </button>
-          .
+          <code className="text-xs">{batch.batchCode}</code>. The print dialog should open automatically.
         </p>
+        <PrintTrigger />
       </div>
 
       <div className="labels-grid">
