@@ -66,6 +66,13 @@ export async function receiveDelivery(args: {
 }) {
   if (!(args.quantity > 0)) throw new Error("Receive quantity must be positive");
 
+  // Per-base-unit cost for this delivery. Pushed back onto the ingredient row
+  // so the next bake's cost_at_bake_fils snapshot uses the latest invoice
+  // price. Phase 2 upgrade is a weighted-average across active batches; for
+  // now "latest delivery wins" matches how a small bakery actually thinks
+  // about cost ("we last paid X for it").
+  const perUnitCostFils = args.costFils > 0 ? args.costFils / args.quantity : 0;
+
   return db.transaction(async (tx) => {
     const [batch] = await tx
       .insert(ingredientBatches)
@@ -96,6 +103,9 @@ export async function receiveDelivery(args: {
       .update(ingredients)
       .set({
         currentStock: sql`${ingredients.currentStock} + ${args.quantity.toString()}::numeric`,
+        // Only overwrite when the operator entered a non-zero cost. Receiving
+        // a sample / unpriced delivery shouldn't zero out the per-unit cost.
+        ...(perUnitCostFils > 0 ? { costPerUnitFils: perUnitCostFils.toFixed(4) } : {}),
       })
       .where(eq(ingredients.id, args.ingredientId));
 
