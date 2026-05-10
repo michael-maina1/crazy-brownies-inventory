@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/forecast",
+      "schedule": "15 2 * * *"
+    },
+    {
+      "path": "/api/cron/expiry-check",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/simulate-orders",
+      "schedule": "*/2 * * * *"
+    }
+  ]
+}

@@ -7,6 +7,8 @@ import {
   numeric,
   boolean,
   timestamp,
+  date,
+  jsonb,
   unique,
   index,
 } from "drizzle-orm/pg-core";
@@ -71,9 +73,39 @@ export const ingredients = pgTable(
       .notNull()
       .default("0"),
     supplierId: uuid("supplier_id").references(() => suppliers.id, { onDelete: "set null" }),
+    // Default shelf life used to project an expiry when receiving a new batch.
+    // Per-batch expiry is editable from the invoice. Null = non-perishable / unknown.
+    shelfLifeDays: integer("shelf_life_days"),
+    isPerishable: boolean("is_perishable").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("ingredients_name_idx").on(t.name)],
+);
+
+// Per-delivery batch tracking. New each time stock is received from a supplier;
+// drives expiry/freshness reporting and (in Phase 2 paid work) FIFO deduction.
+export const ingredientBatches = pgTable(
+  "ingredient_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ingredientId: uuid("ingredient_id")
+      .notNull()
+      .references(() => ingredients.id, { onDelete: "restrict" }),
+    supplierId: uuid("supplier_id").references(() => suppliers.id, { onDelete: "set null" }),
+    batchCode: text("batch_code"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    quantityReceived: numeric("quantity_received", { precision: 12, scale: 3 }).notNull(),
+    quantityRemaining: numeric("quantity_remaining", { precision: 12, scale: 3 }).notNull(),
+    costFils: numeric("cost_fils", { precision: 14, scale: 4 }).notNull().default("0"),
+    note: text("note"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ingredient_batches_ingredient_idx").on(t.ingredientId),
+    index("ingredient_batches_expires_idx").on(t.expiresAt),
+  ],
 );
 
 export const products = pgTable("products", {
@@ -139,6 +171,7 @@ export const stockMovements = pgTable(
     delta: numeric("delta", { precision: 12, scale: 3 }).notNull(),
     reason: movementReason("reason").notNull(),
     orderId: uuid("order_id").references(() => orders.id, { onDelete: "set null" }),
+    batchId: uuid("batch_id").references(() => ingredientBatches.id, { onDelete: "set null" }),
     note: text("note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     createdBy: uuid("created_by"),
@@ -147,6 +180,61 @@ export const stockMovements = pgTable(
     index("stock_movements_ingredient_idx").on(t.ingredientId),
     index("stock_movements_created_at_idx").on(t.createdAt),
   ],
+);
+
+// Daily forecast cache. Populated by `/api/cron/forecast` once per day.
+// One row per (product, date, model_version) — UPSERT-friendly.
+export const forecasts = pgTable(
+  "forecasts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    forecastDate: date("forecast_date").notNull(),
+    predictedUnits: integer("predicted_units").notNull(),
+    lowerBound: integer("lower_bound"),
+    upperBound: integer("upper_bound"),
+    modelVersion: text("model_version").notNull().default("tier1-hw-v1"),
+    // Free-form: dow factor, holiday boost, trend slope, sample window, etc.
+    drivers: jsonb("drivers"),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("forecasts_product_date_version_uq").on(t.productId, t.forecastDate, t.modelVersion),
+    index("forecasts_date_idx").on(t.forecastDate),
+  ],
+);
+
+// Operator alert preferences. Multiple rows allowed per email so different
+// people on the team can subscribe to different signals.
+export const alertSubscriptions = pgTable("alert_subscriptions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").notNull(),
+  label: text("label"),
+  eventLowStock: boolean("event_low_stock").notNull().default(true),
+  eventExpiring: boolean("event_expiring").notNull().default(true),
+  eventDailySummary: boolean("event_daily_summary").notNull().default(false),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Append-only log of every alert the system has dispatched. Used by the
+// dashboard's AI insights feed and for debugging delivery failures.
+export const alertsLog = pgTable(
+  "alerts_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventType: text("event_type").notNull(),
+    subject: text("subject").notNull(),
+    bodyText: text("body_text").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    status: text("status").notNull().default("queued"),
+    errorMessage: text("error_message"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("alerts_log_created_idx").on(t.createdAt)],
 );
 
 // ─── Relations ───────────────────────────────────────────────────────────────
@@ -162,11 +250,28 @@ export const ingredientsRelations = relations(ingredients, ({ one, many }) => ({
   }),
   recipes: many(recipes),
   movements: many(stockMovements),
+  batches: many(ingredientBatches),
+}));
+
+export const ingredientBatchesRelations = relations(ingredientBatches, ({ one }) => ({
+  ingredient: one(ingredients, {
+    fields: [ingredientBatches.ingredientId],
+    references: [ingredients.id],
+  }),
+  supplier: one(suppliers, {
+    fields: [ingredientBatches.supplierId],
+    references: [suppliers.id],
+  }),
 }));
 
 export const productsRelations = relations(products, ({ many }) => ({
   recipes: many(recipes),
   orderItems: many(orderItems),
+  forecasts: many(forecasts),
+}));
+
+export const forecastsRelations = relations(forecasts, ({ one }) => ({
+  product: one(products, { fields: [forecasts.productId], references: [products.id] }),
 }));
 
 export const recipesRelations = relations(recipes, ({ one }) => ({
@@ -200,11 +305,15 @@ export const stockMovementsRelations = relations(stockMovements, ({ one }) => ({
 export type Profile = typeof profiles.$inferSelect;
 export type Supplier = typeof suppliers.$inferSelect;
 export type Ingredient = typeof ingredients.$inferSelect;
+export type IngredientBatch = typeof ingredientBatches.$inferSelect;
 export type Product = typeof products.$inferSelect;
 export type Recipe = typeof recipes.$inferSelect;
 export type Order = typeof orders.$inferSelect;
 export type OrderItem = typeof orderItems.$inferSelect;
 export type StockMovement = typeof stockMovements.$inferSelect;
+export type Forecast = typeof forecasts.$inferSelect;
+export type AlertSubscription = typeof alertSubscriptions.$inferSelect;
+export type AlertLog = typeof alertsLog.$inferSelect;
 
 // Used in seeds/migrations to silence unused import warnings if we wire raw SQL later.
 export const _sql = sql;

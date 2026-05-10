@@ -7,9 +7,10 @@ import {
   orders,
   orderItems,
   recipes,
-  stockMovements,
 } from "@/db/schema";
-import { sql, gte, eq, ilike, and, desc, inArray } from "drizzle-orm";
+import { sql, gte, eq, ilike, desc } from "drizzle-orm";
+import { getTomorrowForecast, getWeekForecast } from "@/db/queries/forecasts";
+import { getExpiringSoonSummary, getExpiringSoonBatches } from "@/db/queries/batches";
 
 // ─── Tool schemas (sent to Claude) ───────────────────────────────────────────
 
@@ -98,6 +99,47 @@ export const TOOLS: Anthropic.Tool[] = [
       type: "object",
       properties: {
         days: { type: "number", description: "Window size in days. Default 30." },
+      },
+    },
+  },
+  {
+    name: "get_production_plan",
+    description:
+      "Tomorrow's recommended bake quantities per product, from the Tier 1 forecast cache. Each entry includes predicted units, lower/upper bounds, and the driver explanation (day-of-week multiplier, trend %, holiday boost). Use this when the user asks 'what should we make tomorrow' or 'how much pistachio kunafa for the weekend'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        product_name: {
+          type: "string",
+          description:
+            "Optional partial product name to drill into a single product's full 7-day forecast. Omit for tomorrow's full plan.",
+        },
+        limit: { type: "number", description: "Cap on rows when listing all products. Default 12." },
+      },
+    },
+  },
+  {
+    name: "get_expiring_soon",
+    description:
+      "Ingredient batches expiring within the next N days. Returns ingredient, remaining quantity, expiry date, freshness state, and AED at risk. Use this for 'what's about to expire' / 'what should we use first' / 'where's our waste risk this week'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "number",
+          description: "Window size in days. Default 7.",
+        },
+      },
+    },
+  },
+  {
+    name: "get_inventory_at_risk",
+    description:
+      "Single-number summary of expiry exposure: how many batches and how much AED is at risk over the next N days. Use this when the user wants the headline waste-risk number.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "Window size in days. Default 7." },
       },
     },
   },
@@ -370,6 +412,83 @@ async function getWaste(args: { days?: number }) {
   }));
 }
 
+async function getProductionPlan(args: { product_name?: string; limit?: number }) {
+  const limit = Math.min(Math.max(args.limit ?? 12, 1), 50);
+
+  if (args.product_name) {
+    const [product] = await db
+      .select({ id: products.id, name: products.name, category: products.category })
+      .from(products)
+      .where(ilike(products.name, `%${args.product_name}%`))
+      .limit(1);
+    if (!product) return { error: `No product matched '${args.product_name}'.` };
+
+    const week = await getWeekForecast(product.id);
+    return {
+      product: product.name,
+      category: product.category,
+      forecast: week,
+    };
+  }
+
+  const tomorrow = await getTomorrowForecast(limit);
+  if (tomorrow.length === 0) {
+    return {
+      error: "Forecast cache is empty. Trigger /api/cron/forecast to populate.",
+    };
+  }
+  return {
+    forecast_date: tomorrow[0].forecastDate,
+    model_version: "tier1-hw-v1",
+    total_units: tomorrow.reduce((s, r) => s + r.predictedUnits, 0),
+    products: tomorrow.map((r) => ({
+      product: r.productName,
+      category: r.category,
+      predicted_units: r.predictedUnits,
+      range: [r.lowerBound, r.upperBound],
+      drivers: {
+        baseline_28d: Number(r.baseline28d.toFixed(1)),
+        dow_factor: r.dowFactor,
+        trend_pct_per_day: r.trendPct,
+        holiday: r.holidayLabel,
+      },
+    })),
+  };
+}
+
+async function getExpiringSoon(args: { days?: number }) {
+  const days = Math.min(Math.max(args.days ?? 7, 1), 60);
+  const batches = await getExpiringSoonBatches(days, 50);
+  return {
+    days,
+    count: batches.length,
+    batches: batches.map((b) => ({
+      ingredient: b.ingredientName,
+      unit: b.unit,
+      quantity_remaining: Number(b.quantityRemaining),
+      expires_at: b.expiresAt ? b.expiresAt.toISOString().slice(0, 10) : null,
+      days_until_expiry: b.expiresAt
+        ? Math.max(0, Math.ceil((b.expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+        : null,
+      freshness: b.freshness,
+      aed_at_risk: Number((b.aedAtRiskFils / 100).toFixed(2)),
+      supplier: b.supplierName ?? null,
+      batch_code: b.batchCode ?? null,
+    })),
+  };
+}
+
+async function getInventoryAtRisk(args: { days?: number }) {
+  const days = Math.min(Math.max(args.days ?? 7, 1), 60);
+  const summary = await getExpiringSoonSummary(days);
+  return {
+    window_days: days,
+    batches_at_risk: summary.batches,
+    expired_count: summary.expiredCount,
+    aed_at_risk: Number((summary.aedAtRiskFils / 100).toFixed(2)),
+  };
+}
+
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 export async function runTool(name: string, input: Record<string, unknown>): Promise<unknown> {
@@ -382,6 +501,9 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
     case "recommend_reorder":            return recommendReorder();
     case "get_recipes_using_ingredient": return getRecipesUsingIngredient(input as { ingredient_name: string });
     case "get_waste":                    return getWaste(input as { days?: number });
+    case "get_production_plan":          return getProductionPlan(input as { product_name?: string; limit?: number });
+    case "get_expiring_soon":            return getExpiringSoon(input as { days?: number });
+    case "get_inventory_at_risk":        return getInventoryAtRisk(input as { days?: number });
     default: return { error: `Unknown tool: ${name}` };
   }
 }

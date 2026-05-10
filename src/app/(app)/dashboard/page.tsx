@@ -7,25 +7,31 @@ import {
   getRecentOrders,
   getWastePercent,
 } from "@/db/queries/dashboard";
+import { getExpiringSoonSummary, getExpiringSoonBatches } from "@/db/queries/batches";
+import { getTomorrowForecast } from "@/db/queries/forecasts";
 import { KPICard } from "@/components/app/kpi-card";
-import { StockStatusBadge, ChannelBadge } from "@/components/app/status-badge";
+import { StockStatusBadge, ChannelBadge, FreshnessBadge } from "@/components/app/status-badge";
 import { SalesChart } from "@/components/app/sales-chart";
+import { ForecastWidget } from "@/components/app/forecast-widget";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import { formatAED, formatAEDCompact, formatQuantity, formatRelative, stockStatus } from "@/lib/format";
-import { CircleDollarSign, ShoppingBag, AlertTriangle, Recycle } from "lucide-react";
+import { CircleDollarSign, AlertTriangle, Recycle, Clock4 } from "lucide-react";
 import Link from "next/link";
 
 export default async function DashboardPage() {
-  const [today, last30, lowStock, series, top, recent, wastePct] = await Promise.all([
-    getOrdersToday(),
-    getRevenueLast30Days(),
-    getLowStockSummary(),
-    getDailyRevenueSeries(30),
-    getTopProducts(30, 5),
-    getRecentOrders(8),
-    getWastePercent(30),
-  ]);
+  const [today, last30, lowStock, series, top, recent, wastePct, atRisk, expiring, forecast] =
+    await Promise.all([
+      getOrdersToday(),
+      getRevenueLast30Days(),
+      getLowStockSummary(),
+      getDailyRevenueSeries(30),
+      getTopProducts(30, 5),
+      getRecentOrders(8),
+      getWastePercent(30),
+      getExpiringSoonSummary(7),
+      getExpiringSoonBatches(7, 6),
+      getTomorrowForecast(8),
+    ]);
 
   const outCount = lowStock.filter((i) => Number(i.currentStock) <= 0).length;
   const criticalCount = lowStock.filter((i) => {
@@ -40,7 +46,7 @@ export default async function DashboardPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Operations Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Sales, stock, and what needs your attention right now.
+            Sales, stock, freshness, and what needs your attention right now.
           </p>
         </div>
         <div className="text-xs text-muted-foreground hidden sm:block">
@@ -48,7 +54,8 @@ export default async function DashboardPage() {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ── Section 1 · At a glance ──────────────────────────────────────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KPICard
           label="Revenue today"
           value={formatAED(today.revenueFils)}
@@ -70,6 +77,13 @@ export default async function DashboardPage() {
           tone={outCount + criticalCount > 0 ? "destructive" : "default"}
         />
         <KPICard
+          label="At risk · 7d"
+          value={formatAED(atRisk.aedAtRiskFils)}
+          hint={`${atRisk.batches} batch${atRisk.batches === 1 ? "" : "es"} expiring`}
+          icon={Clock4}
+          tone={atRisk.aedAtRiskFils > 0 ? "warning" : "default"}
+        />
+        <KPICard
           label="Waste · 30d"
           value={`${wastePct.toFixed(2)}%`}
           hint="of total ingredient usage"
@@ -78,16 +92,11 @@ export default async function DashboardPage() {
         />
       </div>
 
+      {/* ── Section 2 · Tomorrow's plan + reorder list ───────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>Daily revenue</CardTitle>
-            <CardDescription>Last 30 days across all channels</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <SalesChart data={series} />
-          </CardContent>
-        </Card>
+        <div className="lg:col-span-2">
+          <ForecastWidget rows={forecast} />
+        </div>
 
         <Card>
           <CardHeader className="flex-row items-center justify-between">
@@ -120,6 +129,51 @@ export default async function DashboardPage() {
         </Card>
       </div>
 
+      {/* ── Section 3 · Daily revenue + Expiring batches ─────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Daily revenue</CardTitle>
+            <CardDescription>Last 30 days across all channels</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <SalesChart data={series} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex-row items-center justify-between">
+            <div>
+              <CardTitle>Expiring this week</CardTitle>
+              <CardDescription>FIFO list · oldest first</CardDescription>
+            </div>
+            <Link href="/inventory/receive" className="text-xs text-muted-foreground hover:text-foreground">Receive →</Link>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {expiring.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing expires in the next seven days.</p>
+            ) : (
+              expiring.map((b) => (
+                <div key={b.id} className="flex items-start justify-between gap-3 text-sm">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{b.ingredientName}</div>
+                    <div className="text-xs text-muted-foreground tabular-nums">
+                      {formatQuantity(b.quantityRemaining, b.unit)} ·{" "}
+                      {b.expiresAt
+                        ? new Date(b.expiresAt).toLocaleDateString("en-AE", { day: "numeric", month: "short" })
+                        : "—"}{" "}
+                      · {formatAED(b.aedAtRiskFils)}
+                    </div>
+                  </div>
+                  <FreshnessBadge state={b.freshness} />
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ── Section 4 · Top products + Recent orders ─────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
           <CardHeader>

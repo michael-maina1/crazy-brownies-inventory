@@ -1,6 +1,6 @@
 import "server-only";
 import { db } from "@/db/client";
-import { ingredients, stockMovements } from "@/db/schema";
+import { ingredients, stockMovements, ingredientBatches } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 
 export type MovementReason = "sale" | "restock" | "waste" | "adjustment" | "recount";
@@ -18,6 +18,7 @@ export async function recordStockMovement(args: {
   delta: number;
   reason: MovementReason;
   orderId?: string;
+  batchId?: string;
   note?: string;
   createdBy?: string;
 }) {
@@ -29,6 +30,7 @@ export async function recordStockMovement(args: {
         delta: args.delta.toString(),
         reason: args.reason,
         orderId: args.orderId,
+        batchId: args.batchId,
         note: args.note,
         createdBy: args.createdBy,
       })
@@ -42,5 +44,61 @@ export async function recordStockMovement(args: {
       .where(eq(ingredients.id, args.ingredientId));
 
     return movement;
+  });
+}
+
+/**
+ * Receive a supplier delivery. Creates a batch row, increments
+ * `ingredients.current_stock`, and writes the matching restock movement —
+ * all in one transaction. The batch is the audit-quality artefact (where the
+ * stock came from, when, what it cost, when it expires).
+ */
+export async function receiveDelivery(args: {
+  ingredientId: string;
+  supplierId?: string | null;
+  batchCode?: string | null;
+  quantity: number; // base unit, must be positive
+  costFils: number; // total batch cost in fils
+  receivedAt?: Date;
+  expiresAt?: Date | null;
+  note?: string | null;
+  createdBy?: string;
+}) {
+  if (!(args.quantity > 0)) throw new Error("Receive quantity must be positive");
+
+  return db.transaction(async (tx) => {
+    const [batch] = await tx
+      .insert(ingredientBatches)
+      .values({
+        ingredientId: args.ingredientId,
+        supplierId: args.supplierId ?? null,
+        batchCode: args.batchCode ?? null,
+        receivedAt: args.receivedAt ?? new Date(),
+        expiresAt: args.expiresAt ?? null,
+        quantityReceived: args.quantity.toString(),
+        quantityRemaining: args.quantity.toString(),
+        costFils: args.costFils.toString(),
+        note: args.note ?? null,
+        createdBy: args.createdBy,
+      })
+      .returning();
+
+    await tx.insert(stockMovements).values({
+      ingredientId: args.ingredientId,
+      delta: args.quantity.toString(),
+      reason: "restock",
+      batchId: batch.id,
+      note: args.batchCode ? `Batch ${args.batchCode}` : null,
+      createdBy: args.createdBy,
+    });
+
+    await tx
+      .update(ingredients)
+      .set({
+        currentStock: sql`${ingredients.currentStock} + ${args.quantity.toString()}::numeric`,
+      })
+      .where(eq(ingredients.id, args.ingredientId));
+
+    return batch;
   });
 }

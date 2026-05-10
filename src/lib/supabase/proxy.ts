@@ -1,7 +1,10 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/signup", "/auth"];
+// /api/cron is public — protected by CRON_SECRET when set, and by Vercel's
+// platform-level cron auth in production. Same for /api/ingest (Phase 2 channel
+// webhooks). All other routes require an authenticated session.
+const PUBLIC_PATHS = ["/login", "/signup", "/auth", "/api/cron", "/api/ingest"];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });

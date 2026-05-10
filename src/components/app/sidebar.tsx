@@ -10,6 +10,8 @@ import {
   ShoppingCart,
   Sparkles,
   Truck,
+  PackagePlus,
+  Bell,
   Menu,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -27,9 +29,11 @@ type NavItem = { href: string; label: string; icon: React.ComponentType<{ classN
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/inventory", label: "Inventory", icon: Package },
+  { href: "/inventory/receive", label: "Receive", icon: PackagePlus },
   { href: "/products", label: "Products", icon: Cookie },
   { href: "/orders", label: "Orders", icon: ShoppingCart },
   { href: "/suppliers", label: "Suppliers", icon: Truck },
+  { href: "/alerts", label: "Alerts", icon: Bell },
   { href: "/assistant", label: "AI Assistant", icon: Sparkles },
 ];
 

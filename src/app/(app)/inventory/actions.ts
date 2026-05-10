@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { recordStockMovement } from "@/lib/stock";
+import { checkLowStockAlert } from "@/lib/alerts/triggers";
 import { requireProfile, isManagerOrOwner } from "@/lib/auth";
 
 const adjustSchema = z.object({
@@ -35,6 +36,8 @@ export async function adjustStock(_prev: unknown, formData: FormData) {
     note: parsed.data.note,
     createdBy: profile.id,
   });
+
+  await checkLowStockAlert(parsed.data.ingredientId);
 
   revalidatePath("/inventory");
   revalidatePath("/dashboard");

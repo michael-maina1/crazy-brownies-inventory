@@ -6,6 +6,7 @@ import { db } from "@/db/client";
 import { orders, orderItems, products, recipes, stockMovements, ingredients } from "@/db/schema";
 import { eq, inArray, sql } from "drizzle-orm";
 import { requireProfile } from "@/lib/auth";
+import { checkLowStockAlert } from "@/lib/alerts/triggers";
 
 const lineSchema = z.object({
   productId: z.string().uuid(),
@@ -100,6 +101,15 @@ export async function recordSale(input: RecordSaleInput) {
       }
     }
   });
+
+  // Check threshold for every ingredient touched by this sale. Fire-and-forget
+  // — alerts are deduped inside dispatchAlert and we don't want one Resend
+  // outage to fail the sale.
+  await Promise.all(
+    Array.from(ingredientDeltas.keys()).map((id) =>
+      checkLowStockAlert(id).catch(() => undefined),
+    ),
+  );
 
   revalidatePath("/orders");
   revalidatePath("/dashboard");
