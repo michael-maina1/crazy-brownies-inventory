@@ -1,7 +1,8 @@
 import "server-only";
 import { db } from "@/db/client";
-import { products, recipes, orders, orderItems, stockMovements, ingredients } from "@/db/schema";
-import { eq, sql, inArray } from "drizzle-orm";
+import { products, orders, orderItems } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { allocateFromBatchesFIFO } from "@/lib/production";
 
 type OrderChannel = "in_store" | "website" | "deliveroo" | "corporate";
 
@@ -72,25 +73,9 @@ export async function simulateOrder() {
   }
   const lines = Array.from(linesByProduct.values());
 
-  // Recipes for ingredient deduction.
-  const recipeRows = await db
-    .select({
-      productId: recipes.productId,
-      ingredientId: recipes.ingredientId,
-      quantityPerUnit: recipes.quantityPerUnit,
-    })
-    .from(recipes)
-    .where(inArray(recipes.productId, lines.map((l) => l.productId)));
-
-  const ingredientDeltas = new Map<string, number>();
-  for (const line of lines) {
-    const lineRecipes = recipeRows.filter((r) => r.productId === line.productId);
-    for (const r of lineRecipes) {
-      const delta = -Number(r.quantityPerUnit) * line.qty;
-      ingredientDeltas.set(r.ingredientId, (ingredientDeltas.get(r.ingredientId) ?? 0) + delta);
-    }
-  }
-
+  // Path A model: simulator sales debit finished-good batches via FIFO. If a
+  // product hasn't been baked yet under the new system, the order is recorded
+  // but no inventory effect — that's correct, the bake will happen later.
   const totalFils = lines.reduce((s, l) => s + l.priceFils * l.qty, 0);
   const channel = weightedChannel();
 
@@ -102,7 +87,6 @@ export async function simulateOrder() {
         totalFils,
         customerNote: null,
         status: "fulfilled",
-        // createdBy null = system / simulator
       })
       .returning();
 
@@ -115,22 +99,12 @@ export async function simulateOrder() {
       })),
     );
 
-    if (ingredientDeltas.size > 0) {
-      await tx.insert(stockMovements).values(
-        Array.from(ingredientDeltas.entries()).map(([ingredientId, delta]) => ({
-          ingredientId,
-          delta: delta.toString(),
-          reason: "sale" as const,
-          orderId: order.id,
-          note: "Simulated order",
-        })),
-      );
-      for (const [ingredientId, delta] of ingredientDeltas) {
-        await tx
-          .update(ingredients)
-          .set({ currentStock: sql`${ingredients.currentStock} + ${delta.toString()}::numeric` })
-          .where(eq(ingredients.id, ingredientId));
-      }
+    for (const line of lines) {
+      await allocateFromBatchesFIFO(tx, {
+        productId: line.productId,
+        qty: line.qty,
+        orderId: order.id,
+      });
     }
   });
 

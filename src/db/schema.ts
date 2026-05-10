@@ -323,9 +323,42 @@ export const productsRelations = relations(products, ({ many }) => ({
   batches: many(productBatches),
 }));
 
-export const productBatchesRelations = relations(productBatches, ({ one }) => ({
+export const productBatchesRelations = relations(productBatches, ({ one, many }) => ({
   product: one(products, { fields: [productBatches.productId], references: [products.id] }),
   forecast: one(forecasts, { fields: [productBatches.forecastId], references: [forecasts.id] }),
+  movements: many(productBatchMovements),
+}));
+
+// Append-only ledger of every change to a product_batches.quantity_remaining.
+// Sale = -qty (with order_id), waste = -qty, expire = -qty (from cron).
+// Mirrors the ingredient stock_movements pattern but for finished goods.
+export const productBatchMovements = pgTable(
+  "product_batch_movements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productBatchId: uuid("product_batch_id")
+      .notNull()
+      .references(() => productBatches.id, { onDelete: "restrict" }),
+    delta: integer("delta").notNull(),
+    reason: productMovementReason("reason").notNull(),
+    orderId: uuid("order_id").references(() => orders.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("pbm_batch_idx").on(t.productBatchId),
+    index("pbm_created_idx").on(t.createdAt),
+    index("pbm_order_idx").on(t.orderId),
+  ],
+);
+
+export const productBatchMovementsRelations = relations(productBatchMovements, ({ one }) => ({
+  productBatch: one(productBatches, {
+    fields: [productBatchMovements.productBatchId],
+    references: [productBatches.id],
+  }),
+  order: one(orders, { fields: [productBatchMovements.orderId], references: [orders.id] }),
 }));
 
 export const forecastsRelations = relations(forecasts, ({ one }) => ({
@@ -366,6 +399,7 @@ export type Ingredient = typeof ingredients.$inferSelect;
 export type IngredientBatch = typeof ingredientBatches.$inferSelect;
 export type Product = typeof products.$inferSelect;
 export type ProductBatch = typeof productBatches.$inferSelect;
+export type ProductBatchMovement = typeof productBatchMovements.$inferSelect;
 export type Recipe = typeof recipes.$inferSelect;
 export type Order = typeof orders.$inferSelect;
 export type OrderItem = typeof orderItems.$inferSelect;

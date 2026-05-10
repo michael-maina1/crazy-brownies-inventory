@@ -3,11 +3,14 @@ import { db } from "@/db/client";
 import {
   products,
   productBatches,
+  productBatchMovements,
   recipes,
   ingredients,
   stockMovements,
 } from "@/db/schema";
-import { eq, sql, like } from "drizzle-orm";
+import { eq, sql, like, and, gt, inArray } from "drizzle-orm";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Strip the category prefix off a SKU to keep batch codes shorter on the label.
@@ -145,5 +148,131 @@ export async function startBake(args: StartBakeArgs) {
     }
 
     return batch;
+  });
+}
+
+/**
+ * Allocate `qty` units of a product to fulfilment, FIFO across active batches
+ * by oldest expiry first. Writes one product_batch_movements row per batch
+ * touched, decrements quantity_remaining, and flips status to 'depleted' for
+ * any batches that hit zero. Returns how much was actually allocated vs how
+ * much went unfulfilled (for products with no active batches yet).
+ *
+ * Designed to run inside a caller's transaction so the order header + items
+ * + batch movements all commit together.
+ */
+export async function allocateFromBatchesFIFO(
+  tx: Tx,
+  args: {
+    productId: string;
+    qty: number;
+    orderId?: string;
+    createdBy?: string;
+  },
+): Promise<{ allocated: number; unfulfilled: number }> {
+  if (args.qty <= 0) return { allocated: 0, unfulfilled: 0 };
+
+  const batches = await tx
+    .select({
+      id: productBatches.id,
+      quantityRemaining: productBatches.quantityRemaining,
+      expiresAt: productBatches.expiresAt,
+    })
+    .from(productBatches)
+    .where(
+      and(
+        eq(productBatches.productId, args.productId),
+        eq(productBatches.status, "active"),
+        gt(productBatches.quantityRemaining, 0),
+      ),
+    )
+    .orderBy(productBatches.expiresAt);
+
+  let remaining = args.qty;
+  const allocations: { batchId: string; qty: number }[] = [];
+
+  for (const b of batches) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, b.quantityRemaining);
+    if (take <= 0) continue;
+    allocations.push({ batchId: b.id, qty: take });
+    remaining -= take;
+  }
+
+  for (const a of allocations) {
+    await tx.insert(productBatchMovements).values({
+      productBatchId: a.batchId,
+      delta: -a.qty,
+      reason: "sale",
+      orderId: args.orderId,
+      createdBy: args.createdBy,
+    });
+    await tx
+      .update(productBatches)
+      .set({
+        quantityRemaining: sql`${productBatches.quantityRemaining} - ${a.qty}`,
+      })
+      .where(eq(productBatches.id, a.batchId));
+  }
+
+  // Single follow-up update flips any batch that hit zero into 'depleted'.
+  if (allocations.length > 0) {
+    await tx
+      .update(productBatches)
+      .set({ status: "depleted" })
+      .where(
+        and(
+          inArray(
+            productBatches.id,
+            allocations.map((a) => a.batchId),
+          ),
+          eq(productBatches.quantityRemaining, 0),
+        ),
+      );
+  }
+
+  return { allocated: args.qty - remaining, unfulfilled: remaining };
+}
+
+/**
+ * Record a non-sale movement against a finished-good batch (waste, transfer,
+ * adjustment, expire). Atomically: write the ledger row, decrement
+ * quantity_remaining, and flip status if appropriate.
+ */
+export async function recordProductBatchMovement(args: {
+  productBatchId: string;
+  delta: number;
+  reason: "waste" | "adjustment" | "expire" | "transfer";
+  note?: string;
+  createdBy?: string;
+}) {
+  return db.transaction(async (tx) => {
+    await tx.insert(productBatchMovements).values({
+      productBatchId: args.productBatchId,
+      delta: args.delta,
+      reason: args.reason,
+      note: args.note,
+      createdBy: args.createdBy,
+    });
+    await tx
+      .update(productBatches)
+      .set({
+        quantityRemaining: sql`${productBatches.quantityRemaining} + ${args.delta}`,
+      })
+      .where(eq(productBatches.id, args.productBatchId));
+
+    // For waste/expire we also flip the parent status.
+    if (args.reason === "waste" || args.reason === "expire") {
+      const target = args.reason === "expire" ? "expired" : "discarded";
+      await tx
+        .update(productBatches)
+        .set({ status: target })
+        .where(
+          and(
+            eq(productBatches.id, args.productBatchId),
+            eq(productBatches.quantityRemaining, 0),
+          ),
+        );
+    }
   });
 }
