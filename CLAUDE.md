@@ -10,12 +10,13 @@ The original brief lives at `../cookies_problem.txt`. Read it once for context. 
 
 ## Status
 
-- **Live deployment:** https://crazy-brownies-inventory.vercel.app (production target on Vercel; pooler region is `aws-1-eu-central-1`). Latest prod deploy: commit `1526e6f` on 2026-05-10.
+- **Live deployment:** https://crazy-brownies-inventory.vercel.app (production target on Vercel; pooler region is `aws-1-eu-central-1`). Latest prod deploy: commit `9d42ae4` on 2026-05-10.
 - **GitHub:** https://github.com/michael-maina1/crazy-brownies-inventory (public)
-- **Supabase:** Frankfurt project; schema migrated, RLS active, realtime publication live for `ingredients`/`orders`/`stock_movements`/`ingredient_batches`/`forecasts`/`alerts_log`.
+- **Supabase:** Frankfurt project; schema migrated, RLS active, realtime publication live for `ingredients`/`orders`/`stock_movements`/`ingredient_batches`/`forecasts`/`alerts_log`/`product_batches`.
 - **Brand recon:** archived in `.cb-recon/SUMMARY.md` (gitignored). Real Crazy Brownies catalog seeded; channels match their actual ops (in-store / website / Deliveroo / corporate).
-- **Screens shipped:** Dashboard (8-section layout), Inventory, **Inventory → Receive (new)**, Products, Orders, Suppliers (placeholder), **Alerts (new)**, AI Assistant.
-- **Phase-2-lite shipped on 2026-05-10** (was the outreach-demo build): batch tracking, Tier 1 forecast engine + cache + cron, email alerts via Resend, sales simulator endpoint. See "Phase 2 — what was actually built" below before extending. Phases 3+ remain unbuilt and are the paid-engagement pitch.
+- **Screens shipped:** Dashboard (8-section layout), Inventory, Inventory → Receive, **Production (new)**, **Production → Bake (new)**, **Labels print (new)**, **Public batch page `/b/<id>` (new)**, Products (now with SKU + ready-stock), Orders, Suppliers (placeholder), Alerts, AI Assistant.
+- **Phase-2-lite shipped 2026-05-10 (morning):** batch tracking, Tier 1 forecast engine + cache + cron, email alerts via Resend, sales simulator endpoint.
+- **Phase-3-lite (production planning) shipped 2026-05-10 (evening):** `product_batches` schema, `/production` board, `/production/bake/new` form, `/labels/[id]` print preview, `/b/[id]` public best-before page, Products tab SKU + ready-stock counts. **FIFO sale-time deduction is intentionally NOT wired** — sales still deduct ingredients via recipes; that migration (Path A) is paid Phase-2-full work. Camera scanning, PWA, Web Bluetooth ESC/POS direct printing also held back as paid scope.
 
 ## Goals (in priority order)
 
@@ -85,7 +86,8 @@ seed/                         # seed scripts and CSVs
 | `suppliers` | upstream vendors |
 | `ingredients` | raw stock: name, unit (g/kg/ea), current_stock, reorder_threshold, supplier_id, cost_per_unit, **shelf_life_days, is_perishable** |
 | `ingredient_batches` | **(Phase 2)** one row per supplier delivery: batch_code, received_at, expires_at, quantity_received, quantity_remaining, cost_fils. Drives the Expiring KPI + freshness UI. FIFO deduction is **not yet** wired into `recordStockMovement` — that's part of the paid Phase-2-full work. |
-| `products` | sellable SKUs: name, price_aed, category |
+| `products` | sellable SKUs: name, **sku (unique)**, price_aed, category, **freshness_hours**, **default_storage_location**, **default_batch_size** |
+| `product_batches` | **(Phase 3)** one row per bake event: batch_code (unique), baked_at, expires_at, quantity_baked, quantity_remaining, cost_at_bake_fils snapshot, status (`active`/`depleted`/`expired`/`discarded`/`scheduled`/`baking`), optional forecast_id link. Drives `/production` board + Products tab ready-stock counts. **Sale-time FIFO deduction is NOT wired yet** — paid Phase-2-full work. |
 | `recipes` | join table: product_id × ingredient_id × quantity_per_unit (the "1 slab = 400g chocolate" mapping) |
 | `orders` | header: created_at, channel (`in_store` / `website` / `deliveroo` / `corporate`), total_fils, customer_note |
 | `order_items` | line items: order_id × product_id × qty × unit_price_snapshot |
@@ -115,7 +117,7 @@ npm run lint             # ESLint
 npm run db:generate      # generate Drizzle migration from schema diff
 npm run db:migrate       # apply migrations to Supabase
 npm run db:seed          # seed bakery data (suppliers, ingredients, products, recipes, 30d orders)
-npm run db:apply-sql     # apply hand-rolled migrations in drizzle/sql/* (RLS, channel enum, batches/forecasts/alerts)
+npm run db:apply-sql     # apply hand-rolled migrations in drizzle/sql/* (RLS, channel enum, batches/forecasts/alerts, production)
 npm run db:seed-batches  # seed sample ingredient_batches with realistic expiries
 npm run db:forecast      # one-shot populate of the forecasts cache (mirrors /api/cron/forecast)
 npm run db:studio        # open Drizzle Studio
@@ -151,9 +153,34 @@ SIMULATOR_ON=                 # "true" enables /api/cron/simulate-orders to drop
 - **Test the closed loop on camera-able paths** before marking screens done: log in as staff → record an order → watch dashboard tick down → ask the AI "what's running low?" → see real grounded answer.
 - When in doubt about a Next.js 16 API, **read `node_modules/next/dist/docs/`** before writing code.
 
-## Phase 2 — what was actually built (2026-05-10)
+## Phase 3-lite — what was built 2026-05-10 (evening)
 
-A 5-task sprint shipped before the outreach email + screen recording. **All five live in production at https://crazy-brownies-inventory.vercel.app and on `main`.**
+A 6-task sprint shipped to enrich the outreach demo with a kitchen-workflow story. **All live in production.**
+
+### Production planning slice (commits `2c5ca92` + `9d42ae4`)
+
+- **Schema** (`drizzle/sql/004_phase3_production.sql`): `products.sku` (unique, deterministic backfill via category prefix + name slug + 3-char md5 of id to disambiguate variants like Pistachio Kunafa Milk vs Dark), `products.freshness_hours` + `default_batch_size`, new `product_batches` table, `product_batch_status` + `product_movement_reason` enums, `get_public_batch(uuid)` SECURITY DEFINER function (the only public read surface on `product_batches`).
+- **`startBake()`** in `src/lib/production.ts`: atomic transaction that creates the `product_batches` row, debits ingredients per recipe (`stock_movements.reason='adjustment'`, note=`Bake <code>`), and snapshots unit cost. Mirrors the existing `recordStockMovement` pattern.
+- **Routes**:
+  - `/production` — kanban-style: KPI strip (Planned tomorrow / Baked today / On the shelf / Inventory value at cost), Tomorrow's plan from forecast cache, Baked today, On the shelf with FreshnessBadge color coding.
+  - `/production/bake/new` — pre-fills quantity from forecast; live ingredient-cost / revenue / gross-profit preview; Server Action redirects to print preview.
+  - `/labels/[batchId]?qty=N` — print-preview, 50×30 mm thermal layout, server-rendered SVG QR codes resolving to the public best-before page. `PrintTrigger` (client component) auto-fires `window.print()` and exposes a "Open print dialog again" button. **HTML-print MVP** — Web Bluetooth + ESC/POS direct printing is paid Phase-2-full.
+  - `/api/labels/[batchId]` — server-rendered SVG QR via the `qrcode` npm package, encoded URL `https://<host>/b/<id>`.
+  - `/b/[batchId]` — public-readable best-before page, no login required. Reads via `get_public_batch()` SQL function exposing only customer-safe fields.
+- **Products tab update**: SKU code shown as a monospace badge; ready-stock subtitle "Ready: X units across Y batches · best by Z" or "No active batches" with shelf-life hint.
+- **Sidebar**: new `Production` entry between Receive and Products.
+- **`PUBLIC_PATHS`** in `src/lib/supabase/proxy.ts` extended to `/b` and `/api/labels`.
+
+### Gotchas (do not repeat)
+
+- **Server Components forbid inline `onClick` handlers.** The labels page initially had `<button onClick={() => window.print()}>` inline as a manual fallback — Next 16 threw a serialization error (digest `2513251194`). Fix: any UI that needs an event handler must live in a `"use client"` component. The PrintTrigger client component now owns both the auto-fire effect and the manual button.
+- **Hobby plan caps Vercel Cron at daily.** The simulator endpoint `/api/cron/simulate-orders` is **not** in `vercel.json` — drive it manually with a curl loop during the recording window.
+- **`server-only` package isn't a real npm dep**, it's a Next.js bundler shim. `seed/forecast.ts` uses a dynamic `import("../src/lib/forecast/engine")` so dotenv loads before the engine reads `process.env`. The engine itself uses **relative imports** (`../../db/client`) instead of the `@/` alias because tsx doesn't resolve aliases through transitive imports.
+- **SKU collisions on near-duplicate product names** are real ("Viral Pistachio Kunafa Bar (Milk)" vs "(Dark)" both mapped to the same prefix). The migration's backfill includes a 3-char md5(id) suffix specifically to handle this.
+
+## Phase 2-lite — what was built 2026-05-10 (morning)
+
+A 5-task sprint shipped before the production planning work. **All live in production.**
 
 ### 1. Batch tracking (display layer)
 - `ingredient_batches` table + Drizzle schema + RLS policies in `drizzle/sql/003_phase2_demo.sql`.
