@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatAED, formatQuantity } from "@/lib/format";
-import { TrendingUp, Sparkles } from "lucide-react";
+import { TrendingUp, Sparkles, Package } from "lucide-react";
 
 const HERO_BADGES: Record<string, { label: string; tone: "brand" | "muted" }> = {
   "Viral Pistachio Kunafa Bar (Milk)": { label: "Bestseller", tone: "brand" },
@@ -60,7 +60,11 @@ function ProductGrid({ products }: { products: Awaited<ReturnType<typeof getProd
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <CardTitle className="text-base truncate">{p.name}</CardTitle>
-                  <div className="text-xs text-muted-foreground mt-0.5">{p.category}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
+                    <code className="font-mono text-[10px] bg-muted px-1 py-0.5 rounded">{p.sku}</code>
+                    <span>·</span>
+                    <span>{p.category}</span>
+                  </div>
                 </div>
                 {badge ? (
                   <Badge
@@ -81,6 +85,12 @@ function ProductGrid({ products }: { products: Awaited<ReturnType<typeof getProd
                   tone={p.marginPct >= 60 ? "good" : p.marginPct >= 40 ? "default" : "warning"}
                 />
               </div>
+              <ReadyStockLine
+                unitsRemaining={p.unitsRemaining}
+                batchCount={p.batchCount}
+                earliestExpiresAt={p.earliestExpiresAt}
+                freshnessHours={p.freshnessHours}
+              />
               {p.description ? (
                 <p className="text-xs text-muted-foreground mt-3 leading-relaxed">{p.description}</p>
               ) : null}
@@ -125,6 +135,47 @@ function Stat({
       <div className="text-muted-foreground uppercase tracking-wide">{label}</div>
       <div className={`mt-0.5 font-semibold tabular-nums ${muted ? "text-muted-foreground" : toneClass}`}>
         {value}
+      </div>
+    </div>
+  );
+}
+
+function ReadyStockLine({
+  unitsRemaining,
+  batchCount,
+  earliestExpiresAt,
+  freshnessHours,
+}: {
+  unitsRemaining: number;
+  batchCount: number;
+  earliestExpiresAt: Date | null;
+  freshnessHours: number | null;
+}) {
+  const hasStock = unitsRemaining > 0;
+  const tone =
+    !hasStock ? "text-muted-foreground" : "text-foreground";
+  const dateLabel = earliestExpiresAt
+    ? earliestExpiresAt.toLocaleDateString("en-AE", { day: "numeric", month: "short" })
+    : null;
+
+  return (
+    <div className="mt-3 pt-3 border-t flex items-center gap-2 text-xs">
+      <Package className={`size-3.5 shrink-0 ${tone}`} />
+      <div className={`flex-1 min-w-0 ${tone} tabular-nums`}>
+        {hasStock ? (
+          <>
+            <span className="font-semibold">Ready: {unitsRemaining} unit{unitsRemaining === 1 ? "" : "s"}</span>
+            <span className="text-muted-foreground">
+              {" "}across {batchCount} batch{batchCount === 1 ? "" : "es"}
+              {dateLabel ? ` · best by ${dateLabel}` : ""}
+            </span>
+          </>
+        ) : (
+          <span>
+            No active batches
+            {freshnessHours ? <span className="text-muted-foreground"> · {freshnessHours}h shelf</span> : null}
+          </span>
+        )}
       </div>
     </div>
   );

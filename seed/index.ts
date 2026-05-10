@@ -359,12 +359,22 @@ async function main() {
   const ingredientIdByName = new Map(ingredientRows.map((i) => [i.name, i.id]));
   console.log(`  ingredients: ${ingredientRows.length}`);
 
-  // Products
+  // Products. SKU is generated deterministically from category + name and a
+  // random suffix, mirroring the migration's md5-based backfill so re-seeding
+  // produces unique SKUs for near-duplicate names like "Pistachio (Milk)" /
+  // "(Dark)". Freshness/default batch size are filled by 004_phase3_production.sql.
+  const skuFor = (category: string, name: string) => {
+    const cat = category.replace(/[^A-Za-z0-9]+/g, "").toUpperCase().slice(0, 2);
+    const slug = name.replace(/[^A-Za-z0-9]+/g, "").toUpperCase().slice(0, 8);
+    const suffix = Math.random().toString(36).slice(2, 5).toUpperCase();
+    return `${cat}-${slug}-${suffix}`;
+  };
   const productRows = await db
     .insert(schema.products)
     .values(
       PRODUCTS.map((p) => ({
         name: p.name,
+        sku: skuFor(p.category, p.name),
         category: p.category,
         priceFils: p.priceFils,
         description: p.description,

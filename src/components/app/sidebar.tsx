@@ -12,6 +12,7 @@ import {
   Truck,
   PackagePlus,
   Bell,
+  ChefHat,
   Menu,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -30,6 +31,7 @@ const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/inventory", label: "Inventory", icon: Package },
   { href: "/inventory/receive", label: "Receive", icon: PackagePlus },
+  { href: "/production", label: "Production", icon: ChefHat },
   { href: "/products", label: "Products", icon: Cookie },
   { href: "/orders", label: "Orders", icon: ShoppingCart },
   { href: "/suppliers", label: "Suppliers", icon: Truck },

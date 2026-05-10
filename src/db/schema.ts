@@ -32,6 +32,22 @@ export const movementReason = pgEnum("movement_reason", [
   "adjustment",
   "recount",
 ]);
+export const productBatchStatus = pgEnum("product_batch_status", [
+  "scheduled",
+  "baking",
+  "active",
+  "depleted",
+  "expired",
+  "discarded",
+]);
+export const productMovementReason = pgEnum("product_movement_reason", [
+  "bake",
+  "sale",
+  "waste",
+  "transfer",
+  "adjustment",
+  "expire",
+]);
 
 // ─── Tables ──────────────────────────────────────────────────────────────────
 
@@ -111,13 +127,49 @@ export const ingredientBatches = pgTable(
 export const products = pgTable("products", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
+  sku: text("sku").notNull().unique(),
   category: text("category").notNull(),
   priceFils: integer("price_fils").notNull(),
   description: text("description"),
   imageUrl: text("image_url"),
   active: boolean("active").notNull().default(true),
+  // Hours of shelf life from bake time. Drives `expires_at` on each
+  // product_batches row. Backfilled by category in 004 migration.
+  freshnessHours: integer("freshness_hours"),
+  defaultStorageLocation: text("default_storage_location"),
+  defaultBatchSize: integer("default_batch_size"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Finished-good batches — one row per bake event. Mirrors the `ingredient_batches`
+// pattern: parent for traceability + freshness + per-batch margin (cost snapshot
+// at bake time). Sale-time deduction wiring is paid Phase-2-full work.
+export const productBatches = pgTable(
+  "product_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    batchCode: text("batch_code").notNull().unique(),
+    bakedAt: timestamp("baked_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    quantityBaked: integer("quantity_baked").notNull(),
+    quantityRemaining: integer("quantity_remaining").notNull(),
+    costAtBakeFils: integer("cost_at_bake_fils").notNull().default(0),
+    status: productBatchStatus("status").notNull().default("active"),
+    storageLocation: text("storage_location"),
+    forecastId: uuid("forecast_id").references(() => forecasts.id, { onDelete: "set null" }),
+    bakedBy: uuid("baked_by"),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("product_batches_product_idx").on(t.productId),
+    index("product_batches_status_idx").on(t.status),
+    index("product_batches_expires_idx").on(t.expiresAt),
+  ],
+);
 
 export const recipes = pgTable(
   "recipes",
@@ -268,6 +320,12 @@ export const productsRelations = relations(products, ({ many }) => ({
   recipes: many(recipes),
   orderItems: many(orderItems),
   forecasts: many(forecasts),
+  batches: many(productBatches),
+}));
+
+export const productBatchesRelations = relations(productBatches, ({ one }) => ({
+  product: one(products, { fields: [productBatches.productId], references: [products.id] }),
+  forecast: one(forecasts, { fields: [productBatches.forecastId], references: [forecasts.id] }),
 }));
 
 export const forecastsRelations = relations(forecasts, ({ one }) => ({
@@ -307,6 +365,7 @@ export type Supplier = typeof suppliers.$inferSelect;
 export type Ingredient = typeof ingredients.$inferSelect;
 export type IngredientBatch = typeof ingredientBatches.$inferSelect;
 export type Product = typeof products.$inferSelect;
+export type ProductBatch = typeof productBatches.$inferSelect;
 export type Recipe = typeof recipes.$inferSelect;
 export type Order = typeof orders.$inferSelect;
 export type OrderItem = typeof orderItems.$inferSelect;
