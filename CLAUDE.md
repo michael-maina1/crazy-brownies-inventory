@@ -10,11 +10,12 @@ The original brief lives at `../cookies_problem.txt`. Read it once for context. 
 
 ## Status
 
-- **Live deployment:** https://crazy-brownies-inventory.vercel.app (production target on Vercel; pooler region is `aws-1-eu-central-1`)
+- **Live deployment:** https://crazy-brownies-inventory.vercel.app (production target on Vercel; pooler region is `aws-1-eu-central-1`). Latest prod deploy: commit `1526e6f` on 2026-05-10.
 - **GitHub:** https://github.com/michael-maina1/crazy-brownies-inventory (public)
-- **Supabase:** Frankfurt project; schema migrated, RLS active, realtime publication live for `ingredients`/`orders`/`stock_movements`
+- **Supabase:** Frankfurt project; schema migrated, RLS active, realtime publication live for `ingredients`/`orders`/`stock_movements`/`ingredient_batches`/`forecasts`/`alerts_log`.
 - **Brand recon:** archived in `.cb-recon/SUMMARY.md` (gitignored). Real Crazy Brownies catalog seeded; channels match their actual ops (in-store / website / Deliveroo / corporate).
-- **MVP screens shipped:** Dashboard, Inventory, Products, Orders, Suppliers (placeholder), AI Assistant.
+- **Screens shipped:** Dashboard (8-section layout), Inventory, **Inventory → Receive (new)**, Products, Orders, Suppliers (placeholder), **Alerts (new)**, AI Assistant.
+- **Phase-2-lite shipped on 2026-05-10** (was the outreach-demo build): batch tracking, Tier 1 forecast engine + cache + cron, email alerts via Resend, sales simulator endpoint. See "Phase 2 — what was actually built" below before extending. Phases 3+ remain unbuilt and are the paid-engagement pitch.
 
 ## Goals (in priority order)
 
@@ -82,12 +83,16 @@ seed/                         # seed scripts and CSVs
 |---|---|
 | `profiles` | one-to-one with `auth.users`, holds `role` (owner/manager/staff) |
 | `suppliers` | upstream vendors |
-| `ingredients` | raw stock: name, unit (g/kg/ea), current_stock, reorder_threshold, supplier_id, cost_per_unit |
+| `ingredients` | raw stock: name, unit (g/kg/ea), current_stock, reorder_threshold, supplier_id, cost_per_unit, **shelf_life_days, is_perishable** |
+| `ingredient_batches` | **(Phase 2)** one row per supplier delivery: batch_code, received_at, expires_at, quantity_received, quantity_remaining, cost_fils. Drives the Expiring KPI + freshness UI. FIFO deduction is **not yet** wired into `recordStockMovement` — that's part of the paid Phase-2-full work. |
 | `products` | sellable SKUs: name, price_aed, category |
 | `recipes` | join table: product_id × ingredient_id × quantity_per_unit (the "1 slab = 400g chocolate" mapping) |
 | `orders` | header: created_at, channel (`in_store` / `website` / `deliveroo` / `corporate`), total_fils, customer_note |
 | `order_items` | line items: order_id × product_id × qty × unit_price_snapshot |
-| `stock_movements` | append-only ledger of every ingredient change (sale-deduct, restock, waste, adjustment). All inventory changes flow through this — never mutate `ingredients.current_stock` without writing a movement |
+| `stock_movements` | append-only ledger of every ingredient change (sale-deduct, restock, waste, adjustment). All inventory changes flow through this — never mutate `ingredients.current_stock` without writing a movement. Now carries an optional `batch_id` linking restocks to their `ingredient_batches` row. |
+| `forecasts` | **(Phase 2)** daily cache populated by `/api/cron/forecast`. Unique on (product_id, forecast_date, model_version). `drivers` JSONB carries baseline_28d, dow_factor, trend_pct, holiday_boost, holiday_label. |
+| `alert_subscriptions` | **(Phase 2)** email + per-event toggles (low_stock / expiring / daily_summary). RLS allows manager+owner to write, anyone authenticated to read. |
+| `alerts_log` | **(Phase 2)** append-only log of every dispatched alert with status (sent / queued / failed). 12h dedupe inside `dispatchAlert` keys off (event_type, recipient, subject). |
 
 `stock_movements` as the source of truth is non-negotiable — it makes waste reports, audit trails, and "rewind" features trivial later.
 
@@ -104,14 +109,19 @@ seed/                         # seed scripts and CSVs
 ## Commands
 
 ```bash
-npm run dev          # Next dev server
-npm run build        # production build
-npm run lint         # ESLint
-npm run db:generate  # generate Drizzle migration from schema diff
-npm run db:migrate   # apply migrations to Supabase
-npm run db:seed      # seed bakery data
-npm run db:studio    # open Drizzle Studio
+npm run dev              # Next dev server
+npm run build            # production build
+npm run lint             # ESLint
+npm run db:generate      # generate Drizzle migration from schema diff
+npm run db:migrate       # apply migrations to Supabase
+npm run db:seed          # seed bakery data (suppliers, ingredients, products, recipes, 30d orders)
+npm run db:apply-sql     # apply hand-rolled migrations in drizzle/sql/* (RLS, channel enum, batches/forecasts/alerts)
+npm run db:seed-batches  # seed sample ingredient_batches with realistic expiries
+npm run db:forecast      # one-shot populate of the forecasts cache (mirrors /api/cron/forecast)
+npm run db:studio        # open Drizzle Studio
 ```
+
+Order to bring a fresh DB online: `db:push` (or `db:migrate`) → `db:apply-sql` → `db:seed` → `db:seed-batches` → `db:forecast`.
 
 ## Environment variables
 
@@ -123,6 +133,12 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 DATABASE_URL=                 # postgres://... for Drizzle migrations (use the pooler URL on Vercel, direct URL locally)
 ANTHROPIC_API_KEY=
+
+# Phase 2 — optional / demo-mode flips
+RESEND_API_KEY=               # leave unset and alerts queue in "sandbox mode" (logged, not delivered)
+ALERT_FROM_EMAIL=             # default "Crazy Brownies Ops <onboarding@resend.dev>"
+CRON_SECRET=                  # if set, /api/cron/* require Authorization: Bearer <secret>
+SIMULATOR_ON=                 # "true" enables /api/cron/simulate-orders to drop synthetic orders
 ```
 
 `.env.example` mirrors these with empty values and ships in git.
@@ -135,43 +151,71 @@ ANTHROPIC_API_KEY=
 - **Test the closed loop on camera-able paths** before marking screens done: log in as staff → record an order → watch dashboard tick down → ask the AI "what's running low?" → see real grounded answer.
 - When in doubt about a Next.js 16 API, **read `node_modules/next/dist/docs/`** before writing code.
 
-## Roadmap (decided, not yet built)
+## Phase 2 — what was actually built (2026-05-10)
 
-The MVP demonstrates ~85% of the JD. The remaining 15% is two depth features. The user paused on 2026-05-09 to sleep on whether to build them before recording the demo. **Do not start either of these without explicit user confirmation.**
+A 5-task sprint shipped before the outreach email + screen recording. **All five live in production at https://crazy-brownies-inventory.vercel.app and on `main`.**
 
-### Phase 2 — Batch + expiry tracking (next, recommended)
+### 1. Batch tracking (display layer)
+- `ingredient_batches` table + Drizzle schema + RLS policies in `drizzle/sql/003_phase2_demo.sql`.
+- `ingredients.shelf_life_days` + `is_perishable` columns with realistic backfill (cream 7d, eggs 21d, butter 30d, pistachio cream 120d, kunafa 150d, chocolate 365d…).
+- `freshnessOf(expiresAt, shelfLifeDays)` helper in `src/db/queries/batches.ts` returns `expired | expiring_soon | aging | fresh | unknown`.
+- `receiveDelivery()` in `src/lib/stock.ts` — atomic batch insert + stock movement + current_stock update.
+- **Not built**: FIFO deduction inside `recordStockMovement`. Stock still deducts from the cached `current_stock` aggregate. The batch table records receives but does **not** drive sale deductions yet. This is the headline Phase-2-full deliverable to pitch in the paid engagement.
 
-Real F&B waste is expiry-driven, not loss-driven. Current `stock_movements` records waste *events* but not *risk*. Adding lot/batch tracking unlocks the most expensive form of waste detection.
+### 2. Tier 1 forecasting (`tier1-hw-v1`)
+- `src/lib/forecast/engine.ts` — Holt-Winters-flavoured: 28-day baseline × day-of-week multiplier × linear trend × UAE holiday boost. Returns predicted_units + lower/upper bounds + drivers JSON.
+- `forecasts` table caches 7 days × all active products. UPSERT-keyed on (product_id, forecast_date, model_version).
+- `/api/cron/forecast` runs daily at 02:15 UTC via `vercel.json`. Idempotent.
+- `seed/forecast.ts` for one-shot manual regen (uses dynamic import to defer module loading until after dotenv).
+- **Engine uses relative imports** (`../../db/client`) instead of `@/` alias because `tsx` doesn't resolve aliases through transitive imports. Don't switch back.
+- **Phase-2-full upgrade path** (paid): swap `runForecast()` for a Python/FastAPI service implementing the same `ForecastResult` contract. Add weather, social-trend, multi-location signals.
 
-Proposed schema add:
+### 3. Operator alerts
+- `src/lib/alerts/dispatch.ts` — Resend HTTP API via `fetch` (no SDK dep). 12h dedupe on (event_type, recipient, subject). Falls into "sandbox mode" with status='queued' if `RESEND_API_KEY` unset.
+- `src/lib/alerts/triggers.ts::checkLowStockAlert(ingredientId)` — fires after every `recordStockMovement` (manual adjust) and every line of a recorded sale.
+- `/api/cron/expiry-check` — daily 06:00 UTC summary email of batches expiring within 7 days.
+- `/alerts` admin page: subscribers CRUD + recent dispatches + "Send test alert" button.
 
-```ts
-ingredient_batches {
-  id, ingredient_id, batch_code, supplier_id, invoice_ref,
-  received_at, expires_at,
-  quantity_received, quantity_remaining,
-  cost_fils
-}
-```
+### 4. AI tool extensions
+Added to `src/lib/ai/tools.ts`:
+- `get_production_plan(product_name?, limit?)` — reads from forecast cache.
+- `get_expiring_soon(days)` — batches expiring within N days with AED at risk.
+- `get_inventory_at_risk(days)` — single-number rollup.
+System prompt updated to prefer `get_production_plan` over `forecast_demand` for tomorrow/weekend questions, and to surface waste risk proactively.
 
-Required changes:
-- `recordStockMovement` becomes FIFO-aware — deduct from oldest non-expired batch first; cascade to next batch if first is depleted.
-- Seed needs realistic shelf lives per ingredient (chocolate 12mo, pistachio cream 4mo, kunafa 5mo, butter 30d, **cream 7d**, **eggs 21d**, lotus 9mo).
-- New AI tools: `get_expiring_soon(days)`, `recommend_promotion_to_avoid_waste`.
-- Dashboard panel: "Expiring this week" with AED-at-risk total.
-- Inventory drawer: per-ingredient batch list with received/expires/remaining columns.
+### 5. Live-traffic simulator
+- `/api/cron/simulate-orders` drops 1–3 weighted-random synthetic orders through the same write path as a real sale. Bestseller weighting on Pistachio Kunafa / Bueno / 12-Pack.
+- Gated by `SIMULATOR_ON=true` env var.
+- **Not in `vercel.json` crons** — Hobby plan limits crons to daily. During the demo recording, drive it manually:
+  ```bash
+  while true; do curl -sS https://crazy-brownies-inventory.vercel.app/api/cron/simulate-orders > /dev/null; sleep 25; done
+  ```
 
-Effort: ~2–3 hrs focused.
+### Dashboard restructure
+`src/app/(app)/dashboard/page.tsx` now has **4 sections**: 5-up KPI strip (Revenue today / Revenue 30d / Low-stock / **At risk · 7d** / Waste 30d) → Tomorrow's plan + reorder list → Daily revenue chart + Expiring this week → Top products + Recent orders.
 
-### Phase 3 — AI invoice ingestion (held as outreach teaser, not built)
+The 8-section vision (live alerts banner, channel mix, AI insights feed, time-of-day heatmap) was **scoped out** of the outreach build — earn the engagement first, then build them.
 
-Manager photographs a supplier WhatsApp delivery note. Claude vision (`messages.create` with `image` content blocks) extracts ingredient name, quantity, batch code, expiry date, cost. System proposes a draft restock movement; manager taps approve. Killer because every F&B owner re-types delivery notes from photos every day.
+## Roadmap — what to pitch as paid Phase 2+ work
 
-**Decision:** show this as a 30-second concept moment in the recorded demo ("here's what I'd build first if you bring me on") rather than building it. Leaves room to be hired to do the work, not just shown the work.
+**Do not start any of this without explicit user confirmation.** These are deliberately held back so the outreach demo has a clear "if you hire me, here's what I build next" pitch.
 
-### Phases 4+ — Channel integrations
+### Phase-2-full (1–2 weeks)
+- **FIFO deduction** wired into `recordStockMovement` — cascade through batches oldest-first, write `batch_id` on every sale movement, track per-batch `quantity_remaining` accurately.
+- **Product batches** (`product_batches` table) — finished baked goods have their own freshness window (~48h for brownies). Closing-time prediction of unsold inventory.
+- **Vision OCR for invoice photos** — `delivery_notes` table + Claude Vision endpoint. Manager photographs supplier WhatsApp delivery note → draft batch row → human approve. The dealcloser feature.
+- **WhatsApp alerts via Twilio / WhatsApp Business** — pitch as production-grade replacement for Resend email.
+- **Anomaly detection** — z-score on rolling 28-day daily sales per product → "demand spike" alerts in Section 8 of the dashboard.
 
-Ecwid webhook → website orders auto-flow in. Deliveroo Partner API → live delivery channel sales. WhatsApp Business webhook → supplier confirmation messages. Out of scope for the demo; mention in outreach as the integration path.
+### Phase 3 (1–2 weeks)
+- **Channel adapters** — `/api/ingest/sales/{deliveroo,ecwid,whatsapp}` with per-channel webhook handlers. Each normalises to the existing `RecordSale` event.
+- **Talabat / Careem / Noon** as new adapter files when they expand.
+- **Production planning module** — kitchen-tablet bake task list driven by `forecasts` cache; one-tap "I baked 38" closes the forecast/actual loop.
+
+### Phase 4 (multi-week)
+- **Python/FastAPI forecast service** — Prophet or XGBoost, weather API, multi-location, automated retraining on new POS data, A/B testing of model variants.
+- **Multi-location** — schema already supports it (one row per location), UI doesn't.
+- **Drains / observability** — Sentry, Better-Stack, drain config to forward errors to a real dashboard. Currently zero drains on the Hobby plan.
 
 ## Out-of-scope deliberately
 
